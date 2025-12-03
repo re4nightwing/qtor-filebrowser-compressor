@@ -8,6 +8,7 @@ COPY requirements.txt /app/
 RUN pip install -r requirements.txt
 
 COPY app.py /app/
+COPY .env   /app/.env
 
 RUN mkdir -p input output conf logs \
     && mkdir -p input/480 input/720 input/1080
