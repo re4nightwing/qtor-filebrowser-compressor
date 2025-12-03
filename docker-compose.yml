@@ -1,0 +1,23 @@
+services:
+  videoproc:
+    image: videoproc:latest    # use your built image name
+    user: "1001:1001"
+    cpuset: "0,1,2,3"
+    container_name: videoproc
+    volumes:
+      - /hms/data/downloads/queue:/app/input
+      - /hms/data/downloads/compressed:/app/output
+      - ./conf:/app/conf
+      - /hms/logs/compressor:/app/logs
+    environment:
+      - TZ=Asia/Colombo
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+    restart: unless-stopped
+    network_mode: bridge
