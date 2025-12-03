@@ -205,6 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+<<<<<<< HEAD
 
 
 
@@ -212,3 +213,5 @@ conf/
 input/
 logs/
 output/
+=======
+>>>>>>> 716dfe6ddd2db4ba9d98f60767f918d8d9c665b0
