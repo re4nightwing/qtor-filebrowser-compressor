@@ -11,6 +11,9 @@ import shutil
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ===================================================
 # CONFIGURATION
@@ -18,7 +21,8 @@ from watchdog.events import FileSystemEventHandler
 INPUT_DIR = "input"
 OUTPUT_DIR = "output"
 TASKS_FILE = "conf/tasks.json"
-NTFY_TOPIC = "http://161.118.241.80/ntfy/video-compressor"
+NTFY_BASE_URL = os.getenv("NTFY_BASE_URL")
+NTFY_TOPIC = f"{NTFY_BASE_URL}/video-compressor"
 
 VIDEO_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 PROFILE = "medium"
