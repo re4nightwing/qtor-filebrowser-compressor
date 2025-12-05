@@ -455,6 +455,7 @@ def process_video(task):
 
 def processor_loop():
     logger.info("[PROCESSOR] Service started")
+    scan_counter = 0
     while True:
         try:
             tasks = load_tasks()
