@@ -8,13 +8,19 @@ on:
 
 jobs:
   build-and-push:
-    name: Build & Push
+    name: Build & Push Multi-Arch
     runs-on: self-hosted
     environment: venv
 
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+
+      - name: Enable QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to Docker Registry
         uses: docker/login-action@v3
@@ -32,15 +38,19 @@ jobs:
         run: |
           echo "NTFY_BASE_URL=${{ secrets.NTFY_BASE_URL }}" > .env
 
-      - name: Build Docker Image
-        run: |
-          docker build -t ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/qtor-fb-compressor:${TAG} .
-
-      - name: Push Docker Image
-        run: |
-          docker push ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/qtor-fb-compressor:${TAG}
+      - name: Build & Push Multi-Arch Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/qtor-fb-compressor:${{ env.TAG }}
+            ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/qtor-fb-compressor:latest
 
       - name: Print Image Info
         run: |
-          echo "Image pushed: ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/qtor-fb-compressor:${TAG}"
+          echo "Image pushed:"
+          echo "  - ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/qtor-fb-compressor:${TAG}"
+          echo "  - ${{ secrets.DOCKER_REGISTRY }}/${{ secrets.DOCKER_USERNAME }}/qtor-fb-compressor:latest"
 

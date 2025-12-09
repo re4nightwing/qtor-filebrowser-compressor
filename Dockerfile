@@ -15,6 +15,6 @@ RUN mkdir -p input output conf logs \
 
 ENV PYTHONUNBUFFERED=1
 
-VOLUME ["/app/input", "/app/output", "/app/conf", "/app/logs"]
+VOLUME ["/app/input", "/app/output", "/app/conf", "/app/logs", "/app/.env"]
 
 CMD ["python", "app.py"]

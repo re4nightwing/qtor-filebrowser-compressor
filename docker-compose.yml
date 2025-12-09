@@ -1,6 +1,6 @@
 services:
   videoproc:
-    image: re4nightwing/qtor-fb-compressor:20251205104846   # use your built image name
+    image: re4nightwing/qtor-fb-compressor:latest   # use your built image name
     user: "1001:1001"
     cpuset: "0,1,2,3"
     container_name: videoproc
