@@ -226,9 +226,19 @@ def rotate_tasks():
                 logger.error(f"[ROTATION] Failed to save processed archive: {e}")
         
         # Clear main tasks file
-        save_tasks([])
-        logger.info(f"[ROTATION] Cleared tasks.json - Total archived: {len(tasks)}")
-        send_ntfy(f"🔄 Task rotation complete: {len(tasks)} total tasks archived")
+        tasks_clear = []
+        os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
+        temp_file = TASKS_FILE + ".tmp"
+        try:
+            with open(temp_file, "w") as f:
+                json.dump(tasks_clear, f, indent=4)
+            # Atomic move prevents corruption if power fails during write
+            os.replace(temp_file, TASKS_FILE)
+            logger.info(f"[ROTATION] Cleared tasks.json - Total archived: {len(tasks)}")
+            send_ntfy(f"🔄 Task rotation complete: {len(tasks)} total tasks archived")
+        except OSError as e:
+            logger.error(f"Failed to reset tasks file: {e}")
+            send_ntfy(f"🔄 Task rotation Failed: {len(tasks)} total tasks.")
 
 def check_and_rotate():
     """
