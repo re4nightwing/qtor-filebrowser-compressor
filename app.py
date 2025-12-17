@@ -190,9 +190,8 @@ def rotate_tasks():
     - Processed tasks go to conf/tasks.json.<date>
     - Clears the main tasks.json file
     """
+    tasks = load_tasks()
     with data_lock:
-        tasks = load_tasks()
-        
         if not tasks:
             logger.info("[ROTATION] No tasks to rotate")
             return

@@ -9,6 +9,7 @@ services:
       - /hms/data/downloads/compressed:/app/output
       - ./conf:/app/conf
       - /hms/logs/compressor:/app/logs
+      - ./.env:/app/.env
     environment:
       - TZ=Asia/Colombo
     deploy:
