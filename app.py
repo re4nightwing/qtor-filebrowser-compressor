@@ -28,6 +28,8 @@ VIDEO_EXT = set(os.getenv("VIDEO_EXT", "").split(","))
 PROFILE = os.getenv("PROFILE", "medium")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 4))
 
+print(f"Starting with: {NTFY_BASE_URL} -- {NTFY_TOPIC} -- {VIDEO_EXT} -- {PROFILE} -- {CHECK_INTERVAL}" )
+
 # Resolution folders
 RESOLUTION_FOLDERS = ["480", "720", "1080"]
 
@@ -410,7 +412,7 @@ def process_video(task):
         "-crf", x["crf"],
         "-c:a", "aac",
         "-b:a", "128k",
-        out_path,
+        out_path+".mp4",
         "-y"
     ]
 
