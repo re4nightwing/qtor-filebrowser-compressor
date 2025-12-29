@@ -24,9 +24,9 @@ TASKS_FILE = "conf/tasks.json"
 NTFY_BASE_URL = os.getenv("NTFY_BASE_URL")
 NTFY_TOPIC = f"{NTFY_BASE_URL}/video-compressor"
 
-VIDEO_EXT = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
-PROFILE = "medium"
-CHECK_INTERVAL = 4
+VIDEO_EXT = set(os.getenv("VIDEO_EXT", "").split(","))
+PROFILE = os.getenv("PROFILE", "medium")
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 4))
 
 # Resolution folders
 RESOLUTION_FOLDERS = ["480", "720", "1080"]
