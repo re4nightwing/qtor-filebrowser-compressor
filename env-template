@@ -1,0 +1,6 @@
+NTFY_BASE_URL=https://nyfy.sh
+NTFY_TOPIC=<topic-here>
+VIDEO_EXT=.mp4,.mkv,.mov,.avi,.webm,.m4v
+IMAGE_EXT=.jpg,.jpeg,.png
+PROFILE=medium
+CHECK_INTERVAL=4

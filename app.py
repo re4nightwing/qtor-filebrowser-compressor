@@ -12,6 +12,7 @@ from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from dotenv import load_dotenv
+from PIL import Image
 
 load_dotenv()
 
@@ -22,20 +23,22 @@ INPUT_DIR = "input"
 OUTPUT_DIR = "output"
 TASKS_FILE = "conf/tasks.json"
 NTFY_BASE_URL = os.getenv("NTFY_BASE_URL")
-NTFY_TOPIC = f"{NTFY_BASE_URL}/video-compressor"
+NTFY_TOPIC = os.getenv("NTFY_TOPIC")
+NTFY_URL = f"{NTFY_BASE_URL}/{NTFY_TOPIC}"
 
 VIDEO_EXT = set(os.getenv("VIDEO_EXT", "").split(","))
+IMAGE_EXT = set(os.getenv("IMAGE_EXT", "").split(","))  # Image extensions
 PROFILE = os.getenv("PROFILE", "medium")
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 4))
 
-print(f"Starting with: {NTFY_BASE_URL} -- {NTFY_TOPIC} -- {VIDEO_EXT} -- {PROFILE} -- {CHECK_INTERVAL}" )
+print(f"Starting with: {NTFY_URL} -- {VIDEO_EXT} -- {IMAGE_EXT} -- {PROFILE} -- {CHECK_INTERVAL}" )
 
 # Resolution folders
 RESOLUTION_FOLDERS = ["480", "720", "1080"]
 
-ROTATION_THRESHOLD = 100  # Minimum entries before rotation is considered
-ROTATION_SCAN_WAIT = 5     # Number of scan cycles to wait before rotating
-rotation_scan_counter = 0  # Track scan cycles
+ROTATION_THRESHOLD = 100
+ROTATION_SCAN_WAIT = 5
+rotation_scan_counter = 0
 
 # Lock to prevent threads from corrupting the JSON file
 data_lock = threading.Lock()
@@ -56,6 +59,13 @@ X265_PROFILES = {
         "params": "aq-mode=2:bframes=4:ref=3",
         "crf": "28"
     }
+}
+
+# Image compression quality settings
+IMAGE_QUALITY = {
+    "slow": 92,
+    "medium": 85,
+    "fast": 80
 }
 
 # ===================================================
@@ -87,7 +97,7 @@ def file_size(path):
 def send_ntfy(msg):
     try:
         requests.post(
-            f"{NTFY_TOPIC}",
+            f"{NTFY_URL}",
             data=msg.encode("utf-8"),
             headers={"Content-Type": "text/plain; charset=utf-8"},
             timeout=5
@@ -113,21 +123,17 @@ def save_tasks(tasks):
         try:
             with open(temp_file, "w") as f:
                 json.dump(tasks, f, indent=4)
-            # Atomic move prevents corruption if power fails during write
             os.replace(temp_file, TASKS_FILE)
         except OSError as e:
             logger.error(f"Failed to save tasks: {e}")
 
 def fast_hash(path):
-    """ Hashes first 64KB, last 64KB and file size for speed """
     try:
         h = hashlib.md5()
         size = os.path.getsize(path)
         with open(path, "rb") as f:
-            # Read first 64KB
             chunk = f.read(65536)
             h.update(chunk)
-            # Jump to end - 64KB
             if size > 131072:
                 f.seek(-65536, os.SEEK_END)
                 chunk = f.read(65536)
@@ -138,37 +144,30 @@ def fast_hash(path):
         return ""
 
 def detect_resolution_from_path(rel_path):
-    """
-    Detects resolution from folder structure.
-    Expected structure: input/480/video.mp4 or input/720/subfolder/video.mp4
-    Returns resolution string (480, 720, 1080) or None if not in a resolution folder
-    """
     parts = rel_path.split(os.sep)
-    
-    # Check if the first folder is a resolution folder
     if len(parts) > 0 and parts[0] in RESOLUTION_FOLDERS:
         return parts[0]
-    
+    return None
+
+def get_file_type(rel_path):
+    """Determine if file is video or image"""
+    ext = os.path.splitext(rel_path)[1].lower()
+    if ext in VIDEO_EXT:
+        return "video"
+    elif ext in IMAGE_EXT:
+        return "image"
     return None
 
 # ===================================================
 # TASK ROTATION
 # ===================================================
 def should_rotate_tasks(tasks):
-    """
-    Determines if tasks should be rotated based on:
-    1. Total entries above threshold
-    2. All active tasks are completed (no queued/processing)
-    3. Sufficient scan cycles have passed
-    """
     global rotation_scan_counter
     
-    # Check if we have enough entries
     if len(tasks) < ROTATION_THRESHOLD:
         rotation_scan_counter = 0
         return False
     
-    # Check if there are any active tasks
     active_statuses = ["queued", "processing", "waiting_for_resolution"]
     has_active = any(t.get("status") in active_statuses for t in tasks)
     
@@ -176,7 +175,6 @@ def should_rotate_tasks(tasks):
         rotation_scan_counter = 0
         return False
     
-    # Increment counter and check if we've waited enough
     rotation_scan_counter += 1
     
     if rotation_scan_counter >= ROTATION_SCAN_WAIT:
@@ -186,12 +184,6 @@ def should_rotate_tasks(tasks):
     return False
 
 def rotate_tasks():
-    """
-    Archives old tasks when rotation conditions are met:
-    - Error tasks go to conf/tasks-err.json.<date>
-    - Processed tasks go to conf/tasks.json.<date>
-    - Clears the main tasks.json file
-    """
     tasks = load_tasks()
     with data_lock:
         if not tasks:
@@ -201,11 +193,9 @@ def rotate_tasks():
         timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
         error_statuses = ["error_missing_input", "error_exception", "error_no_resolution", "failed"]
         
-        # Separate tasks by status
         error_tasks = [t for t in tasks if t.get("status") in error_statuses]
         processed_tasks = [t for t in tasks if t.get("status") == "processed"]
         
-        # Archive error tasks
         if error_tasks:
             error_file = f"conf/tasks-err.json.{timestamp}"
             try:
@@ -216,7 +206,6 @@ def rotate_tasks():
             except OSError as e:
                 logger.error(f"[ROTATION] Failed to save error archive: {e}")
         
-        # Archive processed tasks
         if processed_tasks:
             processed_file = f"conf/tasks.json.{timestamp}"
             try:
@@ -227,14 +216,12 @@ def rotate_tasks():
             except OSError as e:
                 logger.error(f"[ROTATION] Failed to save processed archive: {e}")
         
-        # Clear main tasks file
         tasks_clear = []
         os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
         temp_file = TASKS_FILE + ".tmp"
         try:
             with open(temp_file, "w") as f:
                 json.dump(tasks_clear, f, indent=4)
-            # Atomic move prevents corruption if power fails during write
             os.replace(temp_file, TASKS_FILE)
             logger.info(f"[ROTATION] Cleared tasks.json - Total archived: {len(tasks)}")
             send_ntfy(f"🔄 Task rotation complete: {len(tasks)} total tasks archived")
@@ -243,12 +230,7 @@ def rotate_tasks():
             send_ntfy(f"🔄 Task rotation Failed: {len(tasks)} total tasks.")
 
 def check_and_rotate():
-    """
-    Checks if rotation should happen and performs it if conditions are met
-    Called periodically by the processor loop
-    """
     tasks = load_tasks()
-    
     if should_rotate_tasks(tasks):
         logger.info(f"[ROTATION] Conditions met: {len(tasks)} entries, no active tasks, {ROTATION_SCAN_WAIT} scans completed")
         rotate_tasks()
@@ -257,7 +239,6 @@ def check_and_rotate():
 # WATCHER LOGIC
 # ===================================================
 def wait_for_file_transfer(filepath):
-    """ Waits until file size stops changing (transfer complete) """
     last_size = -1
     stable_count = 0
     
@@ -281,12 +262,10 @@ def wait_for_file_transfer(filepath):
 def add_task(rel_path):
     abs_path = os.path.join(INPUT_DIR, rel_path)
     
-    # 1. Wait for copy to finish
     if not wait_for_file_transfer(abs_path):
         logger.warning(f"File vanished or empty: {rel_path}")
         return
 
-    # 2. Detect resolution from folder path
     resolution = detect_resolution_from_path(rel_path)
     
     if resolution is None:
@@ -294,22 +273,23 @@ def add_task(rel_path):
         send_ntfy(f"⚠️ File skipped (not in resolution folder): {rel_path}")
         return
 
-    # 3. Check if already exists in memory or disk
+    file_type = get_file_type(rel_path)
+    if file_type is None:
+        logger.warning(f"[SKIP] Unsupported file type: {rel_path}")
+        return
+
     tasks = load_tasks()
-    
-    # Calculate hash safely now that file is stable
     f_hash = fast_hash(abs_path)
     size_before = file_size(abs_path)
 
-    # Skip if we have seen this specific file content before
     if any(t.get("md5") == f_hash for t in tasks):
         logger.info(f"[SKIP] Duplicate file content detected: {rel_path}")
         return
 
-    # Add new task
     new_task = {
         "path": rel_path,
         "md5": f_hash,
+        "type": file_type,
         "resolution": resolution,
         "status": "queued",
         "added_time": now(),
@@ -322,12 +302,11 @@ def add_task(rel_path):
 
     tasks.append(new_task)
     save_tasks(tasks)
-    logger.info(f"[TASK ADDED] {rel_path} (Resolution: {resolution}p)")
-    send_ntfy(f"📁 New File Queued: {rel_path} ({resolution}p)")
+    logger.info(f"[TASK ADDED] {rel_path} (Type: {file_type}, Resolution: {resolution}p)")
+    send_ntfy(f"📁 New {file_type.title()} Queued: {rel_path} ({resolution}p)")
 
 class Handler(FileSystemEventHandler):
     def process(self, src_path):
-        # Ignore temp files or hidden files
         if os.path.basename(src_path).startswith("."):
             return
 
@@ -336,12 +315,12 @@ class Handler(FileSystemEventHandler):
                 for f in files:
                     if f.startswith("."): continue
                     ext = os.path.splitext(f)[1].lower()
-                    if ext in VIDEO_EXT:
+                    if ext in VIDEO_EXT or ext in IMAGE_EXT:
                         rel = os.path.relpath(os.path.join(root, f), INPUT_DIR)
                         add_task(rel)
         else:
             ext = os.path.splitext(src_path)[1].lower()
-            if ext in VIDEO_EXT:
+            if ext in VIDEO_EXT or ext in IMAGE_EXT:
                 rel = os.path.relpath(src_path, INPUT_DIR)
                 add_task(rel)
 
@@ -349,13 +328,11 @@ class Handler(FileSystemEventHandler):
         self.process(event.src_path)
     
     def on_moved(self, event):
-        # Handle files moved into the folder
         if not event.is_directory:
             self.process(event.dest_path)
 
 def initial_scan():
     logger.info("[INIT] Scanning existing files...")
-    # Manual trigger of process logic for existing files
     h = Handler()
     h.process(INPUT_DIR)
 
@@ -372,7 +349,85 @@ def start_watcher():
     observer.join()
 
 # ===================================================
-# PROCESSOR LOGIC
+# IMAGE PROCESSOR
+# ===================================================
+def process_image(task):
+    in_path = os.path.join(INPUT_DIR, task["path"])
+    out_path = os.path.join(OUTPUT_DIR, task["path"])
+    
+    if not os.path.exists(in_path):
+        logger.error(f"Input file missing: {in_path}")
+        task["status"] = "error_missing_input"
+        return
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    resolution = int(task.get("resolution", "1080"))
+    quality = IMAGE_QUALITY.get(PROFILE, 85)
+
+    send_ntfy(f"🖼️ Processing Image: {task['path']} ({resolution}p)")
+    logger.info(f"[STARTED] Image: {task['path']} (Resolution: {resolution}p)")
+
+    start_ts = time.time()
+
+    try:
+        with Image.open(in_path) as img:
+            # Convert RGBA to RGB if needed
+            if img.mode in ('RGBA', 'LA', 'P'):
+                background = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                background.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                img = background
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Get current dimensions
+            width, height = img.size
+            
+            # Only resize if height exceeds target resolution
+            if height > resolution:
+                # Calculate new dimensions maintaining aspect ratio
+                aspect_ratio = width / height
+                new_height = resolution
+                new_width = int(resolution * aspect_ratio)
+                
+                # Ensure width is even (required for some video encoders)
+                if new_width % 2 != 0:
+                    new_width -= 1
+                
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                logger.info(f"[IMAGE] Resized from {width}x{height} to {new_width}x{new_height}")
+            else:
+                logger.info(f"[IMAGE] No resize needed ({width}x{height} already <= {resolution}p)")
+            
+            # Determine output format and extension
+            ext = os.path.splitext(out_path)[1].lower()
+            if ext == '.png':
+                # PNG: optimize with compression
+                img.save(out_path, 'PNG', optimize=True, compress_level=9)
+            else:
+                # JPG/JPEG: use quality setting
+                out_path = os.path.splitext(out_path)[0] + '.jpg'
+                img.save(out_path, 'JPEG', quality=quality, optimize=True)
+
+        end_ts = time.time()
+        
+        task["status"] = "processed"
+        task["end_time"] = now()
+        task["file_size_after"] = file_size(out_path)
+        task["time_taken_seconds"] = round(end_ts - start_ts, 2)
+        
+        size_reduction = ((task["file_size_before"] - task["file_size_after"]) / task["file_size_before"] * 100)
+        send_ntfy(f"🟢 Image Done: {task['path']} ({resolution}p, {size_reduction:.1f}% smaller)")
+        logger.info(f"[FINISHED] Image: {task['path']} - {size_reduction:.1f}% size reduction")
+
+    except Exception as e:
+        logger.error(f"Exception during image processing: {e}")
+        task["status"] = "error_exception"
+        send_ntfy(f"🔴 Image Failed: {task['path']}")
+
+# ===================================================
+# VIDEO PROCESSOR
 # ===================================================
 def process_video(task):
     x = X265_PROFILES[PROFILE]
@@ -387,12 +442,11 @@ def process_video(task):
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     resolution = task.get("resolution", "1080")
 
-    send_ntfy(f"🔵 Processing Started: {task['path']} ({resolution}p)")
-    logger.info(f"[STARTED] {task['path']} (Resolution: {resolution}p)")
+    send_ntfy(f"🔵 Processing Video: {task['path']} ({resolution}p)")
+    logger.info(f"[STARTED] Video: {task['path']} (Resolution: {resolution}p)")
 
     start_ts = time.time()
 
-    # Get duration for progress calculation
     duration = 0
     try:
         probe = subprocess.check_output(
@@ -424,7 +478,6 @@ def process_video(task):
             text=True
         )
 
-        # Read progress
         while True:
             line = process.stderr.readline()
             if not line and process.poll() is not None:
@@ -438,12 +491,11 @@ def process_video(task):
                         h, m, s = t.split(":")
                         elapsed = int(h)*3600 + int(m)*60 + float(s)
                         pct = min(100, (elapsed / duration) * 100)
-                        # Print carriage return only to update line in place
                         print(f"\r[FFMPEG] {pct:5.1f}% - {task['path']}", end="")
                     except:
                         pass
         
-        print() # Newline after progress bar
+        print()
         
         return_code = process.poll()
         end_ts = time.time()
@@ -451,18 +503,30 @@ def process_video(task):
         if return_code == 0:
             task["status"] = "processed"
             task["end_time"] = now()
-            task["file_size_after"] = file_size(out_path)
+            task["file_size_after"] = file_size(out_path+".mp4")
             task["time_taken_seconds"] = round(end_ts - start_ts, 2)
-            send_ntfy(f"🟢 Finished: {task['path']} ({resolution}p)")
-            logger.info(f"[FINISHED] {task['path']}")
+            send_ntfy(f"🟢 Video Done: {task['path']} ({resolution}p)")
+            logger.info(f"[FINISHED] Video: {task['path']}")
         else:
             task["status"] = "failed"
             logger.error(f"[FAILED] FFmpeg return code {return_code} for {task['path']}")
-            send_ntfy(f"🔴 Failed: {task['path']}")
+            send_ntfy(f"🔴 Video Failed: {task['path']}")
 
     except Exception as e:
-        logger.error(f"Exception during processing: {e}")
+        logger.error(f"Exception during video processing: {e}")
         task["status"] = "error_exception"
+
+# ===================================================
+# UNIFIED PROCESSOR LOGIC
+# ===================================================
+def process_media(task):
+    """Route to appropriate processor based on file type"""
+    file_type = task.get("type", "video")
+    
+    if file_type == "image":
+        process_image(task)
+    else:
+        process_video(task)
 
 def processor_loop():
     logger.info("[PROCESSOR] Service started")
@@ -472,12 +536,9 @@ def processor_loop():
             tasks = load_tasks()
             task_to_run = None
             
-            # Find next task safely
             for task in tasks:
                 if task["status"] in ["queued", "waiting_for_resolution"]:
-                    # Ensure resolution is set
                     if not task.get("resolution"):
-                        # Try to detect from path
                         resolution = detect_resolution_from_path(task["path"])
                         if resolution:
                             task["resolution"] = resolution
@@ -490,24 +551,19 @@ def processor_loop():
                     break
             
             if task_to_run:
-                # Mark as processing IMMEDIATELY inside the lock to prevent re-selection
                 task_to_run["status"] = "processing"
                 task_to_run["start_time"] = now()
-                save_tasks(tasks) # Save state before starting work
+                save_tasks(tasks)
                 
-                # Do the heavy work outside the lock
-                process_video(task_to_run)
+                process_media(task_to_run)
                 
-                # Re-load tasks to save the result (in case new tasks came in while processing)
-                # We need to find the specific task object again in the fresh list
                 current_tasks = load_tasks()
                 for t in current_tasks:
                     if t["path"] == task_to_run["path"] and t["md5"] == task_to_run["md5"]:
-                        t.update(task_to_run) # Update fields
+                        t.update(task_to_run)
                         break
                 save_tasks(current_tasks)
             else:
-                # No active tasks - increment scan counter and check rotation
                 scan_counter += 1
                 if scan_counter % CHECK_INTERVAL == 0:
                     check_and_rotate()
@@ -528,7 +584,6 @@ if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs("conf", exist_ok=True)
     
-    # Create resolution subfolders
     for res in RESOLUTION_FOLDERS:
         os.makedirs(os.path.join(INPUT_DIR, res), exist_ok=True)
         logger.info(f"[INIT] Created/verified folder: {INPUT_DIR}/{res}")
@@ -542,7 +597,6 @@ if __name__ == "__main__":
     t2.start()
 
     try:
-        # Keep main thread alive
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
