@@ -7,7 +7,6 @@ import requests
 import hashlib
 import logging
 import re
-import shutil
 from datetime import datetime
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
@@ -22,14 +21,17 @@ load_dotenv()
 INPUT_DIR = "input"
 OUTPUT_DIR = "output"
 TASKS_FILE = "conf/tasks.json"
-NTFY_BASE_URL = os.getenv("NTFY_BASE_URL")
-NTFY_TOPIC = os.getenv("NTFY_TOPIC")
-NTFY_URL = f"{NTFY_BASE_URL}/{NTFY_TOPIC}"
+NTFY_BASE_URL = os.getenv("NTFY_BASE_URL", "")
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")
+NTFY_URL = f"{NTFY_BASE_URL}/{NTFY_TOPIC}" if NTFY_BASE_URL and NTFY_TOPIC else None
 
-VIDEO_EXT = set(os.getenv("VIDEO_EXT", "").split(","))
-IMAGE_EXT = set(os.getenv("IMAGE_EXT", "").split(","))  # Image extensions
+VIDEO_EXT = set(ext for ext in os.getenv("VIDEO_EXT", "").split(",") if ext)
+IMAGE_EXT = set(ext for ext in os.getenv("IMAGE_EXT", "").split(",") if ext)
 PROFILE = os.getenv("PROFILE", "medium")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 4))
+try:
+    CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 4))
+except ValueError:
+    CHECK_INTERVAL = 4
 
 print(f"Starting with: {NTFY_URL} -- {VIDEO_EXT} -- {IMAGE_EXT} -- {PROFILE} -- {CHECK_INTERVAL}" )
 
@@ -82,6 +84,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+if PROFILE not in X265_PROFILES:
+    PROFILE = "medium"
+    logger.warning("Invalid PROFILE in env, defaulting to 'medium'")
+
 # ===================================================
 # UTILITIES
 # ===================================================
@@ -95,6 +101,8 @@ def file_size(path):
         return 0
 
 def send_ntfy(msg):
+    if not NTFY_URL:
+        return
     try:
         requests.post(
             f"{NTFY_URL}",
@@ -183,8 +191,7 @@ def should_rotate_tasks(tasks):
     
     return False
 
-def rotate_tasks():
-    tasks = load_tasks()
+def rotate_tasks(tasks):
     with data_lock:
         if not tasks:
             logger.info("[ROTATION] No tasks to rotate")
@@ -198,23 +205,31 @@ def rotate_tasks():
         
         if error_tasks:
             error_file = f"conf/tasks-err.json.{timestamp}"
+            error_temp = error_file + ".tmp"
             try:
-                with open(error_file, "w") as f:
+                with open(error_temp, "w") as f:
                     json.dump(error_tasks, f, indent=4)
+                os.replace(error_temp, error_file)
                 logger.info(f"[ROTATION] Archived {len(error_tasks)} error tasks to {error_file}")
                 send_ntfy(f"📦 Archived {len(error_tasks)} error tasks")
             except OSError as e:
                 logger.error(f"[ROTATION] Failed to save error archive: {e}")
+                if os.path.exists(error_temp):
+                    os.remove(error_temp)
         
         if processed_tasks:
             processed_file = f"conf/tasks.json.{timestamp}"
+            processed_temp = processed_file + ".tmp"
             try:
-                with open(processed_file, "w") as f:
+                with open(processed_temp, "w") as f:
                     json.dump(processed_tasks, f, indent=4)
+                os.replace(processed_temp, processed_file)
                 logger.info(f"[ROTATION] Archived {len(processed_tasks)} processed tasks to {processed_file}")
                 send_ntfy(f"📦 Archived {len(processed_tasks)} processed tasks")
             except OSError as e:
                 logger.error(f"[ROTATION] Failed to save processed archive: {e}")
+                if os.path.exists(processed_temp):
+                    os.remove(processed_temp)
         
         tasks_clear = []
         os.makedirs(os.path.dirname(TASKS_FILE), exist_ok=True)
@@ -227,13 +242,15 @@ def rotate_tasks():
             send_ntfy(f"🔄 Task rotation complete: {len(tasks)} total tasks archived")
         except OSError as e:
             logger.error(f"Failed to reset tasks file: {e}")
+            if os.path.exists(temp_file):
+                os.remove(temp_file)
             send_ntfy(f"🔄 Task rotation Failed: {len(tasks)} total tasks.")
 
 def check_and_rotate():
     tasks = load_tasks()
     if should_rotate_tasks(tasks):
         logger.info(f"[ROTATION] Conditions met: {len(tasks)} entries, no active tasks, {ROTATION_SCAN_WAIT} scans completed")
-        rotate_tasks()
+        rotate_tasks(tasks)
 
 # ===================================================
 # WATCHER LOGIC
@@ -358,10 +375,11 @@ def process_image(task):
     if not os.path.exists(in_path):
         logger.error(f"Input file missing: {in_path}")
         task["status"] = "error_missing_input"
+        send_ntfy(f"🔴 Image missing: {task['path']}")
         return
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    resolution = int(task.get("resolution", "1080"))
+    resolution = int(task.get("resolution") or 1080)
     quality = IMAGE_QUALITY.get(PROFILE, 85)
 
     send_ntfy(f"🖼️ Processing Image: {task['path']} ({resolution}p)")
@@ -432,15 +450,16 @@ def process_image(task):
 def process_video(task):
     x = X265_PROFILES[PROFILE]
     in_path = os.path.join(INPUT_DIR, task["path"])
-    out_path = os.path.join(OUTPUT_DIR, task["path"])
+    out_path = os.path.join(OUTPUT_DIR, os.path.splitext(task["path"])[0] + ".mp4")
     
     if not os.path.exists(in_path):
         logger.error(f"Input file missing: {in_path}")
         task["status"] = "error_missing_input"
+        send_ntfy(f"🔴 Video missing: {task['path']}")
         return
 
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    resolution = task.get("resolution", "1080")
+    resolution = task.get("resolution") or "1080"
 
     send_ntfy(f"🔵 Processing Video: {task['path']} ({resolution}p)")
     logger.info(f"[STARTED] Video: {task['path']} (Resolution: {resolution}p)")
@@ -466,7 +485,7 @@ def process_video(task):
         "-crf", x["crf"],
         "-c:a", "aac",
         "-b:a", "128k",
-        out_path+".mp4",
+        out_path,
         "-y"
     ]
 
@@ -492,7 +511,7 @@ def process_video(task):
                         elapsed = int(h)*3600 + int(m)*60 + float(s)
                         pct = min(100, (elapsed / duration) * 100)
                         print(f"\r[FFMPEG] {pct:5.1f}% - {task['path']}", end="")
-                    except:
+                    except (ValueError, AttributeError):
                         pass
         
         print()
@@ -503,7 +522,7 @@ def process_video(task):
         if return_code == 0:
             task["status"] = "processed"
             task["end_time"] = now()
-            task["file_size_after"] = file_size(out_path+".mp4")
+            task["file_size_after"] = file_size(out_path)
             task["time_taken_seconds"] = round(end_ts - start_ts, 2)
             send_ntfy(f"🟢 Video Done: {task['path']} ({resolution}p)")
             logger.info(f"[FINISHED] Video: {task['path']}")
@@ -515,6 +534,7 @@ def process_video(task):
     except Exception as e:
         logger.error(f"Exception during video processing: {e}")
         task["status"] = "error_exception"
+        send_ntfy(f"🔴 Video Failed: {task['path']}")
 
 # ===================================================
 # UNIFIED PROCESSOR LOGIC
@@ -545,6 +565,8 @@ def processor_loop():
                         else:
                             logger.error(f"Cannot determine resolution for {task['path']}")
                             task["status"] = "error_no_resolution"
+                            send_ntfy(f"⚠️ Resolution error: {task['path']}")
+                            save_tasks(tasks)
                             continue
                     
                     task_to_run = task
